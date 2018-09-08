@@ -9,18 +9,20 @@ import (
 
 type (
 	Logger struct {
-		Debug         bool   `yaml:"debug"`
-		StdOut        string `yaml:"stdOut"`
-		AppName       string `yaml:"appName"`
-		FileName      string `yaml:"fileName"`
-		SavePath      string `yaml:"savePath"`
-		LogStashHost  string `yaml:"logStashHost"`
-		LogStashPort  int    `yaml:"logStashPort"`
-		RedisHost     string `yaml:"redisHost"`
-		RedisPort     int    `yaml:"redisPort"`
-		RedisDB       int    `yaml:"redisDB"`
-		RedisKey      string `yaml:"redisKey"`
-		RedisPassword string `yaml:"redisPassword"`
+		Debug         bool     `yaml:"debug"`
+		StdOut        string   `yaml:"stdOut"`
+		AppName       string   `yaml:"appName"`
+		FileName      string   `yaml:"fileName"`
+		SavePath      string   `yaml:"savePath"`
+		LogStashHost  string   `yaml:"logStashHost"`
+		LogStashPort  int      `yaml:"logStashPort"`
+		RedisHost     string   `yaml:"redisHost"`
+		RedisPort     int      `yaml:"redisPort"`
+		RedisDB       int      `yaml:"redisDB"`
+		RedisKey      string   `yaml:"redisKey"`
+		RedisPassword string   `yaml:"redisPassword"`
+		Brokers       []string `yaml:"brokers"`
+		Topics        []string `yaml:"topics"`
 	}
 )
 
@@ -39,6 +41,9 @@ func NewLogger(logger *Logger) {
 		logger := NewRedis(logger.AppName, logger.RedisHost, logger.RedisKey, logger.RedisPassword, logger.RedisDB, logger.RedisPort).Output()
 		LLogger = logger.Logger
 		break
+	case "kafka":
+		logger := NewKafka(logger.AppName, logger.Brokers, logger.Topics)
+		LLogger = logger.Logger
 	default:
 		logger := NewFile(logger.SavePath, logger.FileName, logger.Debug).Output()
 		LLogger = logger.Logger
