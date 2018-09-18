@@ -1,10 +1,10 @@
 package logger
 
 import (
+	"fmt"
+	"github.com/bshuster-repo/logrus-logstash-hook"
 	"github.com/sirupsen/logrus"
 	"net"
-	"github.com/bshuster-repo/logrus-logstash-hook"
-	"fmt"
 )
 
 type (

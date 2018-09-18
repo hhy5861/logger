@@ -1,9 +1,9 @@
 package logger
 
 import (
-	"runtime"
 	"fmt"
 	"github.com/sirupsen/logrus"
+	"runtime"
 	"strings"
 )
 

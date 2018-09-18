@@ -2,8 +2,8 @@ package logger
 
 import (
 	"fmt"
-	"os"
 	"github.com/sirupsen/logrus"
+	"os"
 	"strings"
 )
 

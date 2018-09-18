@@ -50,6 +50,8 @@ func (hook *KafkaHook) Output() *KafkaHook {
 
 	hook.Logger.WithField("topics", hook.Topics)
 	hook.Logger.Hooks.Add(hook)
+
+	return hook
 }
 
 func (hook *KafkaHook) Id() string {
@@ -57,7 +59,7 @@ func (hook *KafkaHook) Id() string {
 }
 
 func (hook *KafkaHook) Levels() []logrus.Level {
-	return hook.levels
+	return logrus.AllLevels
 }
 
 func (hook *KafkaHook) Fire(entry *logrus.Entry) error {
@@ -66,7 +68,6 @@ func (hook *KafkaHook) Fire(entry *logrus.Entry) error {
 	t, _ := entry.Data["time"].(time.Time)
 
 	b, err := t.MarshalBinary()
-
 	if err != nil {
 		return err
 	}

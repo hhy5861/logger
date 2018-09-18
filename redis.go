@@ -1,12 +1,12 @@
 package logger
 
 import (
+	"fmt"
+	"github.com/garyburd/redigo/redis"
 	"github.com/sirupsen/logrus"
 	"io/ioutil"
-	"github.com/garyburd/redigo/redis"
-	"fmt"
-	"time"
 	"sync"
+	"time"
 )
 
 var (
