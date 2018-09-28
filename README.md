@@ -38,7 +38,7 @@ logger:
 std out kafka config:
 
 logger:
-    stdOut: redis
+    stdOut: kafka
     debug: true
     brokers: 
       - 127.0.0.1
