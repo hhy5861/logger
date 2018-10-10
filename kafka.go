@@ -1,103 +1,230 @@
 package logger
 
 import (
-	"errors"
-	"github.com/Shopify/sarama"
-	"github.com/sirupsen/logrus"
-	"log"
+	"bufio"
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"time"
+
+	"github.com/Shopify/sarama"
+	"github.com/mailgun/holster/errors"
+	"github.com/mailgun/holster/stack"
+	"github.com/mailgun/logrus-hooks/common"
+	"github.com/mailru/easyjson/jwriter"
+	"github.com/sirupsen/logrus"
 )
 
+const bufferSize = 150
+
 type KafkaHook struct {
-	AppName   string
-	levels    []logrus.Level
-	Formatter logrus.Formatter
-	producer  sarama.AsyncProducer
-	Logger    *logrus.Logger
-	Brokers   []string
-	Topics    []string
+	produce chan []byte
+	conf    Config
+	debug   bool
+
+	// Process identity metadata
+	hostName string
+	appName  string
+	cid      string
+	pid      int
+
+	// Sync stuff
+	wg   sync.WaitGroup
+	once sync.Once
 }
 
-func NewKafka(appName string, brokers, topics []string) *KafkaHook {
-	return &KafkaHook{
-		AppName: appName,
-		Logger:  logrus.New(),
-		Brokers: brokers,
-		Topics:  topics,
-	}
+type Config struct {
+	Endpoints []string
+	Topic     string
+	Producer  sarama.AsyncProducer
 }
 
-func (hook *KafkaHook) Output() *KafkaHook {
-	kafkaConfig := sarama.NewConfig()
-	kafkaConfig.Producer.RequiredAcks = sarama.WaitForLocal
-	kafkaConfig.Producer.Compression = sarama.CompressionSnappy
-	kafkaConfig.Producer.Flush.Frequency = 500 * time.Millisecond
-
-	producer, err := sarama.NewAsyncProducer(hook.Brokers, kafkaConfig)
-	if err != nil {
-		return nil
-	}
-
+func NewWithContext(ctx context.Context, conf Config) (hook *KafkaHook, err error) {
+	done := make(chan struct{})
 	go func() {
-		for err := range producer.Errors() {
-			log.Printf("Failed to send log entry to kafka: %v\n", err)
+		hook, err = NewKafa(conf)
+		close(done)
+	}()
+
+	select {
+	case <-ctx.Done():
+		return hook, fmt.Errorf("connect timeout while connecting to kafka peers %s",
+			strings.Join(conf.Endpoints, ","))
+	case <-done:
+		return hook, err
+	}
+}
+
+func NewKafa(conf Config) (*KafkaHook, error) {
+	var err error
+
+	kafkaConfig := sarama.NewConfig()
+	kafkaConfig.Producer.RequiredAcks = sarama.WaitForAll
+	kafkaConfig.Producer.Compression = sarama.CompressionSnappy
+	kafkaConfig.Producer.Flush.Frequency = 200 * time.Millisecond
+	kafkaConfig.Producer.Retry.Backoff = 10 * time.Second
+	kafkaConfig.Producer.Retry.Max = 6
+
+	// If the user failed to provide a producer create one
+	if conf.Producer == nil {
+		conf.Producer, err = sarama.NewAsyncProducer(conf.Endpoints, kafkaConfig)
+		if err != nil {
+			return nil, errors.Wrap(err, "kafka producer error")
+		}
+	}
+
+	h := KafkaHook{
+		produce: make(chan []byte, bufferSize),
+		conf:    conf,
+	}
+
+	h.wg.Add(1)
+	go func() {
+		for {
+			select {
+			case buf, ok := <-h.produce:
+				if !ok {
+					h.wg.Done()
+					return
+				}
+				conf.Producer.Input() <- &sarama.ProducerMessage{
+					Value: sarama.ByteEncoder(buf),
+					Topic: conf.Topic,
+					Key:   nil,
+				}
+			}
 		}
 	}()
 
-	hook.Formatter = DefaultFormatter(logrus.Fields{
-		"type": hook.AppName,
-	})
+	if h.hostName, err = os.Hostname(); err != nil {
+		h.hostName = "unknown"
+	}
+	h.appName = filepath.Base(os.Args[0])
+	if h.pid = os.Getpid(); h.pid == 1 {
+		h.pid = 0
+	}
 
-	hook.Logger.WithField("topics", hook.Topics)
-	hook.Logger.Hooks.Add(hook)
-
-	return hook
+	h.cid = getDockerCID()
+	return &h, nil
 }
 
-func (hook *KafkaHook) Id() string {
-	return hook.AppName
-}
+func (h *KafkaHook) Fire(entry *logrus.Entry) error {
+	var caller *stack.FrameInfo
+	var err error
 
-func (hook *KafkaHook) Levels() []logrus.Level {
-	return logrus.AllLevels
-}
+	caller = common.GetLogrusCaller()
 
-func (hook *KafkaHook) Fire(entry *logrus.Entry) error {
-	var partitionKey sarama.ByteEncoder
+	rec := &common.LogRecord{
+		Category:  "logrus",
+		AppName:   h.appName,
+		HostName:  h.hostName,
+		LogLevel:  strings.ToUpper(entry.Level.String()),
+		FileName:  caller.File,
+		FuncName:  caller.Func,
+		LineNo:    caller.LineNo,
+		Message:   entry.Message,
+		Context:   nil,
+		Timestamp: common.Number(float64(entry.Time.UnixNano()) / 1000000000),
+		CID:       h.cid,
+		PID:       h.pid,
+	}
+	rec.FromFields(entry.Data)
 
-	t, _ := entry.Data["time"].(time.Time)
+	var w jwriter.Writer
+	rec.MarshalEasyJSON(&w)
+	if w.Error != nil {
+		return errors.Wrap(w.Error, "while marshalling json")
+	}
+	buf := w.Buffer.BuildBytes()
 
-	b, err := t.MarshalBinary()
+	if h.debug {
+		fmt.Printf("%s\n", string(buf))
+	}
+
+	err = h.sendKafka(buf)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "while sending")
 	}
 
-	partitionKey = sarama.ByteEncoder(b)
+	defer h.Close()
+	return nil
+}
 
-	var topics []string
-
-	if ts, ok := entry.Data["topics"]; ok {
-		if topics, ok = ts.([]string); !ok {
-			return errors.New("field topics must be []string")
-		}
-	} else {
-		return errors.New("field topics not found")
-	}
-
-	b, err = hook.Formatter.Format(entry)
-
-	if err != nil {
-		return err
-	}
-
-	value := sarama.ByteEncoder(b)
-	for _, topic := range topics {
-		hook.producer.Input() <- &sarama.ProducerMessage{
-			Key:   partitionKey,
-			Topic: topic,
-			Value: value,
-		}
+func (h *KafkaHook) sendKafka(buf []byte) error {
+	select {
+	case h.produce <- buf:
+	default:
+		// If the producer input channel buffer is full, then we better drop
+		// a log record than block program execution.
+		fmt.Fprintf(os.Stderr, "kafkahook buffer overflow: %s\n", string(buf))
 	}
 
 	return nil
+}
+
+// Given an io reader send the contents of the reader to udplog
+func (h *KafkaHook) SendIO(input io.Reader) error {
+	// Append our identifier
+	buf := bytes.NewBuffer([]byte(""))
+	_, err := buf.ReadFrom(input)
+	if err != nil {
+		return errors.Wrap(err, "while reading from IO")
+	}
+
+	if h.debug {
+		fmt.Printf("%s\n", buf.String())
+	}
+
+	err = h.sendKafka(buf.Bytes())
+	if err != nil {
+		return errors.Wrap(err, "while sending")
+	}
+
+	return nil
+}
+
+// Levels returns the available logging levels.
+func (h *KafkaHook) Levels() []logrus.Level {
+	return logrus.AllLevels
+}
+
+func (h *KafkaHook) SetDebug(set bool) {
+	h.debug = set
+}
+
+// Close the kakfa producer and flush any remaining logs
+func (h *KafkaHook) Close() error {
+	var err error
+	h.once.Do(func() {
+		close(h.produce)
+		h.wg.Wait()
+		err = h.conf.Producer.Close()
+	})
+	return err
+}
+
+func getDockerCID() string {
+	f, err := os.Open("/proc/self/cgroup")
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.Split(line, "/docker/")
+		if len(parts) != 2 {
+			continue
+		}
+
+		fullDockerCID := parts[1]
+		return fullDockerCID[:12]
+	}
+	return ""
 }

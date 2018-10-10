@@ -15,12 +15,6 @@ var (
 			return &logrus.Entry{}
 		},
 	}
-
-	logstashFields   = logrus.Fields{"@version": "1", "type": "log"}
-	logstashFieldMap = logrus.FieldMap{
-		logrus.FieldKeyTime: "@timestamp",
-		logrus.FieldKeyMsg:  "message",
-	}
 )
 
 type (
@@ -132,7 +126,6 @@ func (hook *RedisHook) Fire(entry *logrus.Entry) error {
 	conn := hook.RedisPool.Get()
 	defer conn.Close()
 
-	fmt.Println(string(dataBytes))
 	_, err = conn.Do("RPUSH", hook.RedisKey, dataBytes)
 	if err != nil {
 		return fmt.Errorf("error sending message to REDIS: %s", err)
@@ -150,23 +143,6 @@ func (hook *RedisHook) Fire(entry *logrus.Entry) error {
 
 func (hook *RedisHook) Levels() []logrus.Level {
 	return logrus.AllLevels
-}
-
-func copyEntry(entry *logrus.Entry, fields logrus.Fields) *logrus.Entry {
-	ne := entryPool.Get().(*logrus.Entry)
-	ne.Message = entry.Message
-	ne.Level = entry.Level
-	ne.Time = entry.Time
-	ne.Data = logrus.Fields{}
-	for k, v := range fields {
-		ne.Data[k] = v
-	}
-
-	for k, v := range entry.Data {
-		ne.Data[k] = v
-	}
-
-	return ne
 }
 
 func newRedisConnectionPool(server, password string, port int, db int) *redis.Pool {
